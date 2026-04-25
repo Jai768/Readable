@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation } from "@tanstack/react-query";
 import toast from "react-hot-toast";
 
-import { useReadableEyeTracker } from "../hooks/useGazeFlow";
+import { useGazeInput, type GazeSource } from "../hooks/useGazeInput";
 import { startDiagnostic, submitDiagnostic } from "../api/sessions";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { RecordButton } from "../components/RecordButton";
@@ -53,21 +53,23 @@ export const DiagnosticPage = () => {
     clearEyeTrackingFocusEvents,
   } = sessionStore();
   const setStudentProfile = profileStore((state) => state.setStudentProfile);
+  const gazeSource = (import.meta.env.VITE_GAZE_SOURCE ?? "mouse") as GazeSource;
   const [appKey] = useState(
     import.meta.env.VITE_READABLE_EYE_TRACKER_APP_KEY ??
-      import.meta.env.VITE_GAZEFLOW_APP_KEY ??
-      "AppKeyTrial",
+    import.meta.env.VITE_GAZEFLOW_APP_KEY ??
+    "AppKeyTrial",
   );
   const [port] = useState(
     import.meta.env.VITE_READABLE_EYE_TRACKER_PORT ??
-      import.meta.env.VITE_GAZEFLOW_PORT ??
-      "43333",
+    import.meta.env.VITE_GAZEFLOW_PORT ??
+    "43333",
   );
   const [activeWordIndex, setActiveWordIndex] = useState<number | null>(null);
   const [gazeDot, setGazeDot] = useState<{ x: number; y: number } | null>(null);
   const [focusedWordCounts, setFocusedWordCounts] = useState<Record<number, number>>({});
   const passageRef = useRef<HTMLDivElement | null>(null);
-  const tracker = useReadableEyeTracker({
+  const tracker = useGazeInput({
+    source: gazeSource,
     appKey,
     port: Number.parseInt(port, 10) || 43333,
   });
@@ -134,9 +136,9 @@ export const DiagnosticPage = () => {
     setGazeDot(
       insidePassage
         ? {
-            x: viewport.x - rect.left,
-            y: viewport.y - rect.top,
-          }
+          x: viewport.x - rect.left,
+          y: viewport.y - rect.top,
+        }
         : null,
     );
 
@@ -291,11 +293,10 @@ export const DiagnosticPage = () => {
                               <span
                                 key={`${currentIndex}-${word}`}
                                 data-word-index={currentIndex}
-                                className={`mx-[0.14em] my-[0.06em] inline-flex max-w-full items-center justify-center rounded-xl px-[0.2em] py-[0.1em] align-baseline break-words transition ${
-                                  activeWordIndex === currentIndex
+                                className={`mx-[0.14em] my-[0.06em] inline-flex max-w-full items-center justify-center rounded-xl px-[0.2em] py-[0.1em] align-baseline break-words transition ${activeWordIndex === currentIndex
                                     ? "bg-sea text-white"
                                     : "bg-white/60"
-                                }`}
+                                  }`}
                               >
                                 {word}
                               </span>
