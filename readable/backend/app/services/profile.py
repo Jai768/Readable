@@ -31,6 +31,7 @@ async def create_or_update(
             avg_accuracy_pct=float(results["accuracy_pct"]),
             attention_score=float(results["attention_score"]),
             difficult_words=sorted(difficulty_pool),
+            model_profile_scores=_extract_model_profile_scores(results),
         )
         db.add(profile)
         await db.flush()
@@ -45,6 +46,9 @@ async def create_or_update(
     )
     profile.reading_level = _reading_level(profile.avg_accuracy_pct)
     profile.difficult_words = sorted(set(profile.difficult_words).union(difficulty_pool))
+    model_scores = _extract_model_profile_scores(results)
+    if model_scores:
+        profile.model_profile_scores = model_scores
     await db.flush()
     return profile
 
@@ -67,6 +71,7 @@ async def build_profile_response(db: AsyncSession, student_id: int) -> StudentPr
             avg_accuracy_pct=0.0,
             attention_score=0.0,
             difficult_words=[],
+            model_profile_scores={},
         )
 
     sessions_result = await db.execute(
@@ -100,6 +105,7 @@ async def build_profile_response(db: AsyncSession, student_id: int) -> StudentPr
         avg_accuracy_pct=profile.avg_accuracy_pct,
         attention_score=profile.attention_score,
         difficult_words=profile.difficult_words,
+        model_profile_scores=profile.model_profile_scores,
         recent_sessions=recent_sessions,
     )
 
@@ -140,3 +146,14 @@ def _reading_level(accuracy_pct: float) -> str:
     if accuracy_pct >= 85:
         return "Developing"
     return "Foundational"
+
+
+def _extract_model_profile_scores(results: dict[str, object]) -> dict[str, float]:
+    value = results.get("model_profile_scores", {})
+    if not isinstance(value, dict):
+        return {}
+    return {
+        str(key): float(score)
+        for key, score in value.items()
+        if isinstance(score, (int, float))
+    }

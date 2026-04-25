@@ -16,6 +16,7 @@ export interface StudentProfile {
   avg_accuracy_pct: number;
   attention_score: number;
   difficult_words: string[];
+  model_profile_scores: Record<string, number>;
   recent_sessions: SessionSummary[];
 }
 

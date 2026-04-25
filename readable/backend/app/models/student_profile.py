@@ -17,6 +17,7 @@ class StudentProfile(Base):
     avg_accuracy_pct: Mapped[float] = mapped_column(Float, default=0.0)
     attention_score: Mapped[float] = mapped_column(Float, default=0.0)
     difficult_words: Mapped[list[str]] = mapped_column(JSONB, default=list)
+    model_profile_scores: Mapped[dict[str, float]] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

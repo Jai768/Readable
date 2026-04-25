@@ -5,7 +5,6 @@ import toast from "react-hot-toast";
 import { useGazeInput, type GazeSource } from "../hooks/useGazeInput";
 import { startDiagnostic, submitDiagnostic } from "../api/sessions";
 import { ErrorBanner } from "../components/ErrorBanner";
-import { RecordButton } from "../components/RecordButton";
 import { ScoreCard } from "../components/ScoreCard";
 import { TextReader } from "../components/TextReader";
 import { getErrorMessage } from "../lib/errors";
@@ -53,6 +52,7 @@ export const DiagnosticPage = () => {
     clearEyeTrackingFocusEvents,
   } = sessionStore();
   const setStudentProfile = profileStore((state) => state.setStudentProfile);
+  const studentProfile = profileStore((state) => state.studentProfile);
   const gazeSource = (import.meta.env.VITE_GAZE_SOURCE ?? "mouse") as GazeSource;
   const [appKey] = useState(
     import.meta.env.VITE_READABLE_EYE_TRACKER_APP_KEY ??
@@ -68,6 +68,10 @@ export const DiagnosticPage = () => {
   const [gazeDot, setGazeDot] = useState<{ x: number; y: number } | null>(null);
   const [focusedWordCounts, setFocusedWordCounts] = useState<Record<number, number>>({});
   const passageRef = useRef<HTMLDivElement | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const [isRecording, setIsRecording] = useState(false);
   const tracker = useGazeInput({
     source: gazeSource,
     appKey,
@@ -94,10 +98,17 @@ export const DiagnosticPage = () => {
 
   const submitMutation = useMutation({
     mutationFn: ({ file, eyePayload }: { file: File; eyePayload: Record<string, unknown> }) =>
-      submitDiagnostic(currentSession?.sessionId ?? 0, file, eyePayload),
+      submitDiagnostic(currentSession?.sessionId ?? -1, file, eyePayload),
     onSuccess: (response) => {
       setSessionResults(response.result);
       setStudentProfile(response.profile);
+      // Force a new diagnostic session next time instead of reusing a stale session id.
+      setCurrentSession(null);
+      clearEyeTrackingFocusEvents();
+      setActiveWordIndex(null);
+      setGazeDot(null);
+      setFocusedWordCounts({});
+      tracker.clearSamples();
       toast.success("Diagnostic submitted.");
     },
   });
@@ -119,6 +130,8 @@ export const DiagnosticPage = () => {
         .slice(0, 5),
     [focusedWordCounts, passageWords],
   );
+  const modelScores = studentProfile?.model_profile_scores ?? {};
+  const hasModelScores = Object.keys(modelScores).length > 0;
 
   useEffect(() => {
     if (!tracker.latestSample || !passageRef.current) {
@@ -192,6 +205,66 @@ export const DiagnosticPage = () => {
     };
   };
 
+  const startTest = async () => {
+    if (!currentSession?.sessionId) {
+      toast.error("Start a diagnostic session first.");
+      return;
+    }
+    if (isRecording || submitMutation.isPending) {
+      return;
+    }
+
+    tracker.connect();
+    if (!navigator.mediaDevices || typeof MediaRecorder === "undefined") {
+      setIsRecording(true);
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      mediaStreamRef.current = stream;
+      mediaRecorderRef.current = recorder;
+      chunksRef.current = [];
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          chunksRef.current.push(event.data);
+        }
+      };
+
+      recorder.onstop = async () => {
+        const blob = new Blob(chunksRef.current, { type: "audio/webm" });
+        const file = new File([blob], "reading-session.webm", { type: "audio/webm" });
+        mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+        mediaStreamRef.current = null;
+        setIsRecording(false);
+        await submitMutation.mutateAsync({ file, eyePayload: buildEyeTrackingPayload() });
+        tracker.disconnect();
+      };
+
+      recorder.start();
+      setIsRecording(true);
+    } catch {
+      setIsRecording(true);
+      toast("Microphone access failed, using a simulated recording.");
+    }
+  };
+
+  const stopTest = async () => {
+    if (!isRecording || submitMutation.isPending) {
+      return;
+    }
+    if (!mediaRecorderRef.current) {
+      const fallbackFile = new File(["mock audio"], "reading-session.webm", { type: "audio/webm" });
+      setIsRecording(false);
+      await submitMutation.mutateAsync({ file: fallbackFile, eyePayload: buildEyeTrackingPayload() });
+      tracker.disconnect();
+      return;
+    }
+    mediaRecorderRef.current.stop();
+  };
+
   return (
     <div className="space-y-6">
       {!passage ? (
@@ -238,27 +311,18 @@ export const DiagnosticPage = () => {
                 </div>
                 <button
                   type="button"
-                  onClick={tracker.connect}
+                  onClick={() => void startTest()}
                   className="rounded-full bg-sea px-5 py-3 text-sm font-semibold text-white transition hover:bg-teal-700"
                 >
-                  Start Eye Tracker
+                  {isRecording ? "Test Running..." : "Start Test"}
                 </button>
                 <button
                   type="button"
-                  onClick={tracker.disconnect}
+                  onClick={() => void stopTest()}
                   className="rounded-full border border-slate-200 px-5 py-3 text-sm font-semibold text-slate-600 transition hover:border-sea hover:text-sea"
                 >
-                  Stop Eye Tracker
+                  Stop Test
                 </button>
-                <RecordButton
-                  label="Start Recording"
-                  onStop={async (file) => {
-                    await submitMutation.mutateAsync({
-                      file,
-                      eyePayload: buildEyeTrackingPayload(),
-                    });
-                  }}
-                />
               </div>
             </div>
 
@@ -366,6 +430,24 @@ export const DiagnosticPage = () => {
           <div>
             <h2 className="mb-3 text-xl font-semibold text-ink">Highlighted passage</h2>
             <TextReader text={[sessionResults.expected_text]} highlights={sessionResults.errors} />
+          </div>
+          <div className="rounded-3xl border border-white/70 bg-white/90 p-6 shadow-soft">
+            <h2 className="text-xl font-semibold text-ink">ML Output Profile</h2>
+            {hasModelScores ? (
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+                {Object.entries(modelScores).map(([name, score]) => (
+                  <div key={name} className="rounded-2xl bg-mist p-4">
+                    <p className="text-sm text-slate-500">{name.replaceAll("_", " ")}</p>
+                    <p className="mt-2 text-2xl font-semibold text-ink">{score.toFixed(3)}</p>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="mt-3 text-sm text-slate-600">
+                Model scores unavailable. Add `dyslexia_profiler.pt` in `backend/profile_model` and rerun the
+                diagnostic test.
+              </p>
+            )}
           </div>
         </section>
       ) : null}

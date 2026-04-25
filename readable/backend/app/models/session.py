@@ -30,3 +30,5 @@ class Session(Base):
     student = relationship("User", back_populates="sessions", foreign_keys=[student_id])
     result = relationship("SessionResult", back_populates="session", uselist=False)
     progress_entries = relationship("ProgressEntry", back_populates="session")
+    eye_tracking_feature = relationship("EyeTrackingFeature", uselist=False)
+    voice_feature = relationship("VoiceFeature", uselist=False)

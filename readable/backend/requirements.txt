@@ -10,3 +10,6 @@ passlib[bcrypt]==1.7.4
 pydantic-settings==2.9.1
 python-multipart==0.0.20
 email-validator==2.2.0
+numpy
+torch
+librosa

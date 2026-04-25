@@ -22,6 +22,13 @@ export const LoginPage = () => {
       navigate("/dashboard");
     },
   });
+  const mutationMessage = mutation.isError ? getErrorMessage(mutation.error) : "";
+  const looksLikeVoiceFeatureValidation =
+    mutationMessage.includes("speech_rate_wps") ||
+    mutationMessage.includes("pause_duration_ms") ||
+    mutationMessage.includes("pause_frequency") ||
+    mutationMessage.includes("mispronunciation_rate") ||
+    mutationMessage.includes("repetition_rate");
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-hero-radial px-4 py-12">
@@ -67,7 +74,17 @@ export const LoginPage = () => {
               />
             </label>
           </div>
-          {mutation.isError ? <div className="mt-4"><ErrorBanner message={getErrorMessage(mutation.error)} /></div> : null}
+          {mutation.isError ? (
+            <div className="mt-4 space-y-2">
+              <ErrorBanner
+                message={
+                  looksLikeVoiceFeatureValidation
+                    ? "Login request reached a non-auth endpoint. Check API base URL/server route configuration."
+                    : mutationMessage
+                }
+              />
+            </div>
+          ) : null}
           <button
             type="submit"
             disabled={mutation.isPending}

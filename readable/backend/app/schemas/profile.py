@@ -21,6 +21,7 @@ class StudentProfileResponse(BaseModel):
     avg_accuracy_pct: float
     attention_score: float
     difficult_words: list[str]
+    model_profile_scores: dict[str, float]
     recent_sessions: list[SessionSummary]
 
 

@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.deps import require_role
 from app.core.redis import cache_json, delete_cached_value, get_cached_json
-from app.models import PersonalizedContent, Session, SessionResult, User
+from app.models import EyeTrackingFeature, PersonalizedContent, Session, SessionResult, User, VoiceFeature
 from app.models.session import SessionStatus, SessionType
 from app.schemas.lesson import PersonalizedContentResponse
 from app.schemas.session import (
@@ -20,8 +20,14 @@ from app.schemas.session import (
     SessionResultPayload,
 )
 from app.services.content import DIAGNOSTIC_PASSAGE
+from app.services.dyslexia_profile_inference import (
+    build_profiler_features,
+    predict_profile_scores,
+)
+from app.services.eye_features import extract_eye_tracking_metrics
 from app.services.profile import build_profile_response, create_or_update
 from app.services.progress import create_progress_entry
+from app.services.voice_features import extract_voice_metrics
 from app.stubs import eye_tracker, nlp, stt
 
 
@@ -158,7 +164,17 @@ async def _submit_session(
 ) -> DiagnosticSubmitResponse | dict[str, object]:
     payload = await get_cached_json(_session_key(session_id))
     if payload is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session cache not found")
+        if expected_session_type == SessionType.diagnostic:
+            # Diagnostic sessions can recover after backend restarts because the expected text is static.
+            payload = {
+                "expected_text": DIAGNOSTIC_PASSAGE,
+                "session_type": SessionType.diagnostic.value,
+            }
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Session cache not found. Start a new reading session and submit again.",
+            )
 
     session_result = await db.execute(
         select(Session).where(Session.id == session_id, Session.student_id == current_user.id)
@@ -170,17 +186,22 @@ async def _submit_session(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid session type")
 
     existing_result = await db.execute(select(SessionResult).where(SessionResult.session_id == session_id))
-    if existing_result.scalar_one_or_none() is not None:
+    existing = existing_result.scalar_one_or_none()
+    if existing is not None:
+        if expected_session_type == SessionType.diagnostic:
+            profile = await build_profile_response(db, current_user.id)
+            return DiagnosticSubmitResponse(
+                result=_result_payload_from_existing(session, existing),
+                profile=profile,
+            )
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Session already submitted")
 
-    try:
-        eye_payload = json.loads(eye_tracking_payload)
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid eye tracking payload") from exc
+    eye_payload = _parse_eye_payload(eye_tracking_payload)
 
     expected_text = str(payload["expected_text"])
     stt.prime_expected_text(expected_text)
-    spoken_text = await stt.transcribe(await audio_file.read())
+    audio_bytes = await audio_file.read()
+    spoken_text = await stt.transcribe(audio_bytes)
     nlp_result = await nlp.compare_texts(spoken_text, expected_text)
     eye_result = await eye_tracker.analyze(eye_payload)
     accuracy_pct = _accuracy_pct(expected_text, nlp_result["errors"])
@@ -196,6 +217,47 @@ async def _submit_session(
         accuracy_pct=accuracy_pct,
     )
     db.add(result_model)
+    focus_events = eye_payload.get("focus_events", []) if isinstance(eye_payload, dict) else []
+    metrics = extract_eye_tracking_metrics(
+        focus_events=focus_events if isinstance(focus_events, list) else [],
+        expected_word_count=len(expected_text.split()),
+    )
+    db.add(
+        EyeTrackingFeature(
+            student_id=current_user.id,
+            session_id=session.id,
+            fixation_duration_ms=metrics["fixation_duration_ms"],
+            saccade_length=metrics["saccade_length"],
+            regression_count=metrics["regression_count"],
+            skipped_words=metrics["skipped_words"],
+            reading_speed_wpm=metrics["reading_speed_wpm"],
+        )
+    )
+    voice_metrics = extract_voice_metrics(
+        spoken_text=spoken_text,
+        expected_text=expected_text,
+        errors=nlp_result["errors"],
+        speed_wpm=float(nlp_result["speed_wpm"]),
+        audio_bytes=audio_bytes,
+    )
+    db.add(
+        VoiceFeature(
+            student_id=current_user.id,
+            session_id=session.id,
+            speech_rate_wps=voice_metrics["speech_rate_wps"],
+            pause_duration_ms=voice_metrics["pause_duration_ms"],
+            pause_frequency=voice_metrics["pause_frequency"],
+            mispronunciation_rate=voice_metrics["mispronunciation_rate"],
+            repetition_rate=voice_metrics["repetition_rate"],
+        )
+    )
+    profiler_features = build_profiler_features(
+        eye_metrics=metrics,
+        voice_metrics=voice_metrics,
+        expected_word_count=len(expected_text.split()),
+        audio_bytes=audio_bytes,
+    )
+    model_profile_scores = predict_profile_scores(profiler_features) or {}
 
     session.status = SessionStatus.completed.value
     session.ended_at = datetime.now(timezone.utc)
@@ -208,6 +270,7 @@ async def _submit_session(
             "speed_wpm": nlp_result["speed_wpm"],
             "accuracy_pct": accuracy_pct,
             "attention_score": eye_result["attention_score"],
+            "model_profile_scores": model_profile_scores,
         },
     )
 
@@ -262,3 +325,37 @@ def _words_practiced(expected_text: str, errors: object) -> list[str]:
 
 def _session_key(session_id: int) -> str:
     return f"readable:session:{session_id}"
+
+
+def _parse_eye_payload(eye_tracking_payload: str) -> dict[str, object]:
+    raw = (eye_tracking_payload or "").strip()
+    if not raw or raw.lower() in {"undefined", "null"}:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _result_payload_from_existing(session: Session, existing: SessionResult) -> SessionResultPayload:
+    eye_data = existing.eye_tracking_data if isinstance(existing.eye_tracking_data, dict) else {}
+    return SessionResultPayload(
+        session_id=session.id,
+        spoken_text=existing.spoken_text,
+        expected_text=existing.expected_text,
+        errors=existing.errors if isinstance(existing.errors, list) else [],
+        speed_wpm=float(existing.speed_wpm),
+        hesitation_points=(
+            list(existing.hesitation_points) if isinstance(existing.hesitation_points, list) else []
+        ),
+        attention_score=float(eye_data.get("attention_score", 0.0)),
+        skip_events=list(eye_data.get("skip_events", []))
+        if isinstance(eye_data.get("skip_events", []), list)
+        else [],
+        re_read_events=list(eye_data.get("re_read_events", []))
+        if isinstance(eye_data.get("re_read_events", []), list)
+        else [],
+        avg_fixation_ms=int(eye_data.get("avg_fixation_ms", 0) or 0),
+        accuracy_pct=float(existing.accuracy_pct),
+    )

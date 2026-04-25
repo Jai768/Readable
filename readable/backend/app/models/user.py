@@ -26,3 +26,5 @@ class User(Base):
     sessions = relationship("Session", back_populates="student")
     personalized_content_items = relationship("PersonalizedContent", back_populates="student")
     progress_entries = relationship("ProgressEntry", back_populates="student")
+    eye_tracking_features = relationship("EyeTrackingFeature")
+    voice_features = relationship("VoiceFeature")
